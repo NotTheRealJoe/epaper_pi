@@ -1,3 +1,5 @@
 pki/
 .venv*/
 config.ini
+build/
+dist/
