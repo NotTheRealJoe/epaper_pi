@@ -3,3 +3,4 @@ pki/
 config.ini
 build/
 dist/
+res/
