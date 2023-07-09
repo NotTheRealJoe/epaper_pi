@@ -159,13 +159,13 @@ def mqtt_connect():
                     last_drawing_displayed_id = drawing_id
                     display_image_from_bytes(message.payload)
                     cur.execute(
-                        "INSERT INTO drawings (id, created_time, displayed_time, removed, data) VALUES (?, datetime('now'), datetime('now'), 0, ?)",
+                        "INSERT INTO `drawings` (id, created_time, displayed_time, removed, data) VALUES (?, datetime('now'), datetime('now'), 0, ?)",
                         (drawing_id, message.payload)
                     )
                 else:
                     # just save it
                     cur.execute(
-                        "INSERT INTO drawings (id, displayed_time, removed, data) VALUES (?, datetime('now'), 0, ?)",
+                        "INSERT INTO `drawings` (id, created_time, removed, data) VALUES (?, datetime('now'), 0, ?)",
                         (drawing_id, message.payload)
                     )
                 con.commit()
