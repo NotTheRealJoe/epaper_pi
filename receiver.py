@@ -266,9 +266,12 @@ print("Display ready")
 # display_text("Display ready")
 
 # === Connect to database ===
-con = sqlite3.connect("epaper.db")
+con = sqlite3.connect(database_file)
 cur = con.cursor()
 
 # ==== Start MQTT client
 client = mqtt_connect()
-client.loop_forever(timeout=1.0, max_packets=1, retry_first_connection=True)
+try:
+    client.loop_forever(timeout=1.0, max_packets=1, retry_first_connection=True)
+finally:
+    con.close()
