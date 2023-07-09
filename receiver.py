@@ -10,6 +10,12 @@ from datetime import datetime
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 
+def resolve_relative_path(path):
+    if path.startswith("/"):
+        return path
+    else:
+        return SCRIPT_DIR + "/" + path
+
 config = configparser.ConfigParser()
 config.read(SCRIPT_DIR + "/config.ini")
 
@@ -19,12 +25,10 @@ topic = config.get("mqtt", "topic")
 client_id = config.get("mqtt", "client_id_prefix") + f'-{random.randint(0, 1000)}'
 username = config.get("mqtt", "username")
 password = config.get("mqtt", "password")
-database_file = config.get("db", "path")
-cur_qr_path = config.get("qrcode", "path")
+database_file = resolve_relative_path(config.get("db", "path"))
+cur_qr_path = resolve_relative_path(config.get("qrcode", "path"))
 
-tls_ca_path = config.get("mqtt", "tls_ca_path")
-if not tls_ca_path.startswith("/"):
-    tls_ca_path = SCRIPT_DIR + "/" + tls_ca_path
+tls_ca_path = resolve_relative_path(config.get("mqtt", "tls_ca_path"))
 
 FIRST_RECONNECT_DELAY = config.get("mqtt", "first_connect_delay")
 RECONNECT_RATE = int(config.get("mqtt", "reconnect_rate"))
