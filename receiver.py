@@ -1,12 +1,12 @@
 #!/usr/bin/python
 # -*- coding:utf-8 -*-
 
-import os, sys, configparser, random, time, logging, io, math, sqlite3
+import os, sys, configparser, random, time, logging, io, math, sqlite3, threading, datetime
 from enum import Enum
 from waveshare_epd import epd2in13_V3
 from PIL import Image, ImageDraw, ImageFont
 from paho.mqtt import client as mqtt_client
-from datetime import datetime
+from queue import Queue
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -39,9 +39,9 @@ class SystemState(Enum):
     QR_CODE = 1
     DRAWING = 2
     BLANKED = 3
+    SHUTDOWN = 4
 
 system_state = SystemState.STARTUP
-last_drawing_displayed_id = -1
 
 def display_text(text):
     image = Image.new('1', (epd.height, epd.width), 255)
@@ -49,11 +49,9 @@ def display_text(text):
     draw.text((0, 0), text, font=hack16, fill=0)
     display_upside_down(image)
 
-
 def display_upside_down(image):
     image = image.rotate(180)
     epd.display(epd.getbuffer(image))
-
 
 def scale_letterboxed(image, new_width, new_height):
     # first compute the scale factor based on the height
@@ -95,8 +93,7 @@ def display_image_full(image):
 def display_image_from_bytes(bytes):
     display_image_full(Image.open(io.BytesIO(bytes)))
 
-def next_image_available():
-    global cur
+def next_drawing_available(cur):
     res = cur.execute("SELECT COUNT(*) FROM `drawings` WHERE displayed_time IS NULL AND `removed` = 0;")
     count = res.fetchone()[0]
     return int(count) > 0
@@ -109,8 +106,8 @@ def display_qr_from_disk():
         return
     display_image_full(image)
 
-def display_next_drawing():
-    global cur, con, last_drawing_displayed_id
+def display_next_drawing(cur, con):
+    global last_drawing_displayed_id
     res = cur.execute("SELECT * FROM `drawings` WHERE `displayed_time` IS NULL AND `removed` = 0 ORDER BY `created_time` ASC LIMIT 1;")
     row = res.fetchone()
     if row == None:
@@ -125,6 +122,43 @@ def display_next_drawing():
         (str(row[0]), )
     )
     con.commit()
+
+def parse_sqlite_date(date_str):
+    return datetime.datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+
+def image_timer_loop(precision):
+    global system_state, database_file, last_drawing_displayed_id
+
+    # sqlite3 connection from parent thread cannot be used so create one just for this function
+    con = sqlite3.connect(database_file)
+    cur = con.cursor()
+
+    while True:
+        if system_state == SystemState.DRAWING:
+            # get the most recently displayed image
+            res = cur.execute("SELECT * FROM `drawings` WHERE `displayed_time` IS NOT NULL ORDER BY `displayed_time` DESC LIMIT 1")
+            row = cur.fetchone()
+
+            # compute when the currently displayed image should be replaced
+            if row == None:
+                # no last-displayed image was known, hard-set expiration date in the past
+                expiration_time = datetime.datetime.utcfromtimestamp(0)
+            else:
+                last_displayed_drawing_displayed_time = parse_sqlite_date(row[2])
+                #expiration_time = last_displayed_drawing_displayed_time + datetime.timedelta(minutes = 5)
+                expiration_time = last_displayed_drawing_displayed_time + datetime.timedelta(seconds = 30)
+            
+            # replace the image if it is time
+            if expiration_time < datetime.datetime.utcnow():
+                if next_drawing_available(cur):
+                    display_next_drawing(cur, con)
+                else:
+                    display_qr_from_disk()
+                    
+        elif system_state == SystemState.SHUTDOWN:
+            break
+
+        time.sleep(precision)
 
 def mqtt_connect():
     def on_connect(client, userdata, flags, rc):
@@ -179,8 +213,8 @@ def mqtt_connect():
                 cur.execute("UPDATE `drawings` SET `removed`=1 WHERE `id`=?", (id, ))
                 con.commit()
                 if last_drawing_displayed_id == id:
-                    if next_image_available():
-                        display_next_image()
+                    if next_drawing_available(cur):
+                        display_next_drawing(cur, con)
                     else:
                         system_state = SystemState.QR_CODE
                         display_qr_from_disk()
@@ -193,9 +227,9 @@ def mqtt_connect():
                     epd.Clear(0xFF)
                     epd.sleep()
                 elif payload_str == "false":
-                    if(next_image_available()):
+                    if(next_drawing_available(cur)):
                         system_state = SystemState.DRAWING
-                        display_next_drawing()
+                        display_next_drawing(cur, con)
                     else:
                         system_state = SystemState.QR_CODE
                         display_qr_from_disk()
@@ -212,7 +246,7 @@ def mqtt_connect():
         client.subscribe("epaper/cmnd/#", qos=2)
 
         # publish a message to let the server know we just booted up
-        client.publish("epaper/online", datetime.utcnow().isoformat())
+        client.publish("epaper/online", datetime.datetime.utcnow().isoformat())
 
     def on_disconnect(client, userdata, rc):
         print("on_disconnect called")
@@ -265,13 +299,20 @@ except IOError as e:
 print("Display ready")
 # display_text("Display ready")
 
-# === Connect to database ===
-con = sqlite3.connect(database_file)
-cur = con.cursor()
-
-# ==== Start MQTT client
-client = mqtt_connect()
 try:
-    client.loop_forever(timeout=1.0, max_packets=1, retry_first_connection=True)
+    # === Connect to database ===
+    con = sqlite3.connect(database_file)
+    cur = con.cursor()
+
+    # Start thread for choosing a new image every 5 minutes
+    timer_thread = threading.Thread(target=image_timer_loop, args=(10,))
+    timer_thread.start()
+
+    # ==== Start MQTT client
+    client = mqtt_connect()
+    client.loop_forever(timeout=5.0, max_packets=1, retry_first_connection=True)
 finally:
+    system_state = SystemState.SHUTDOWN
+    print("Waiting for timer thread to exit!")
+    timer_thread.join()
     con.close()
