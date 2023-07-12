@@ -3,10 +3,12 @@
 
 import os, sys, configparser, random, time, logging, io, math, sqlite3, threading, datetime
 from enum import Enum
+from PIL import Image, ImageFont
 from waveshare_epd import epd2in13_V3
-from PIL import Image, ImageDraw, ImageFont
 from paho.mqtt import client as mqtt_client
 from queue import Queue
+
+import display
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -43,56 +45,6 @@ class SystemState(Enum):
 
 system_state = SystemState.STARTUP
 
-def display_text(text):
-    image = Image.new('1', (epd.height, epd.width), 255)
-    draw = ImageDraw.Draw(image)
-    draw.text((0, 0), text, font=hack16, fill=0)
-    display_upside_down(image)
-
-def display_upside_down(image):
-    image = image.rotate(180)
-    epd.display(epd.getbuffer(image))
-
-def scale_letterboxed(image, new_width, new_height):
-    # first compute the scale factor based on the height
-    scaleFactor = new_height / image.height
-
-    # if the height-based scale factor would result in a width that is still too
-    # large, update the scale factor to be based on the width
-    if math.trunc(image.width * scaleFactor) > new_width:
-        scaleFactor = new_width / image.width
-
-    image = image.resize((
-        math.trunc(image.width * scaleFactor),
-        math.trunc(image.height * scaleFactor)
-    ))
-
-    # if we ended up with an image the exact desired dimensions, just return it.
-    # otherwise, we need to paste the scaled image into the center of a new
-    # blank image
-    if image.width == new_width and image.height == new_height:
-        return image
-
-    newImage = Image.new('1', (new_width, new_height), 255)
-
-    newImage.paste(image, (
-        math.trunc((new_width / 2) - (image.width / 2)),
-        math.trunc((new_height / 2) - (image.height / 2))
-    ))
-
-    return newImage
-
-# scale, rotate, and put put the image on the screen
-def display_image_full(image):
-    if image.height != 122 or image.width != 250:
-            image = scale_letterboxed(image, 250, 122)
-    epd.init()
-    display_upside_down(image)
-    epd.sleep()
-
-def display_image_from_bytes(bytes):
-    display_image_full(Image.open(io.BytesIO(bytes)))
-
 def next_drawing_available(cur):
     res = cur.execute("SELECT COUNT(*) FROM `drawings` WHERE displayed_time IS NULL AND `removed` = 0;")
     count = res.fetchone()[0]
@@ -104,7 +56,7 @@ def display_qr_from_disk():
     except:
         logging.error("Unable to open QR code image. Something wrong with state.")
         return
-    display_image_full(image)
+    display.image_full(image, epd)
 
 def display_next_drawing(cur, con):
     global last_drawing_displayed_id
@@ -113,7 +65,7 @@ def display_next_drawing(cur, con):
     if row == None:
         logging.error("Couldn't display next drawing because none are available. Something's wrong with the state.")
         return
-    display_image_full(Image.open(io.BytesIO(row[4])))
+    display.image_full(Image.open(io.BytesIO(row[4])), epd)
     last_drawing_displayed_id = row[0]
     
     # mark the selected drawing as having been displayed
@@ -162,10 +114,8 @@ def image_timer_loop(precision):
 
 def mqtt_connect():
     def on_connect(client, userdata, flags, rc):
-        # display_text("MQTT connection started")
         def on_subscribe(client, userdata, message_id, granted_qos):
             print('Subscription granted for message_id ' + str(message_id) + ', QOS ' + str(granted_qos[0]))
-            # display_text("Subscription granted\nMQTT ready\nmessage_id: " + str(message_id) + "\nQOS: " + str(granted_qos[0]))
 
         # Main handler for incoming messages - this is the where it all happens!
         def on_message(client, userdata, message):
@@ -180,10 +130,10 @@ def mqtt_connect():
                 # If we are currently showing the QR code or have just started
                 # up, update the screen now
                 if system_state == SystemState.QR_CODE:
-                    display_image_from_bytes(message.payload)
+                    display.image_from_bytes(message.payload, epd)
                 elif system_state == SystemState.STARTUP:
                     system_state = SystemState.QR_CODE
-                    display_image_from_bytes(message.payload)
+                    display.image_from_bytes(message.payload, epd)
             elif message.topic.startswith("epaper/cmnd/image/add/"):
                 # save the image locally
                 drawing_id = int(message.topic[message.topic.rfind("/") + 1:])
@@ -191,7 +141,7 @@ def mqtt_connect():
                     # if we're waiting for a drawing, show it immediately and then save it already marked as displaye
                     system_state = SystemState.DRAWING
                     last_drawing_displayed_id = drawing_id
-                    display_image_from_bytes(message.payload)
+                    display.image_from_bytes(message.payload, epd)
                     cur.execute(
                         "INSERT INTO `drawings` (id, created_time, displayed_time, removed, data) VALUES (?, datetime('now'), datetime('now'), 0, ?)",
                         (drawing_id, message.payload)
@@ -239,7 +189,7 @@ def mqtt_connect():
 
         if rc != 0:
             print("Failed to connect to MQTT broker: return code %d\n", rc)
-            display_text("Failed to connect to MQTT broker: return code " + str(rc))
+            display.text("Failed to connect to MQTT broker: return code " + str(rc), epd, hack16)
             return
 
         # set up subscription
@@ -277,7 +227,7 @@ def mqtt_connect():
             client.connect(broker, port)
             return client
         except Exception as error:
-            display_text("Connection failed\n" + str(error))
+            display.text("Connection failed\n" + str(error), epd, hack16)
             time.sleep(RECONNECT_RATE)
             # ... then loop again and try to connect
             continue
@@ -297,7 +247,7 @@ try:
 except IOError as e:
     logging.error(e)
 print("Display ready")
-# display_text("Display ready")
+display.text("Display ready", epd, hack16)
 
 try:
     # === Connect to database ===

@@ -4,3 +4,4 @@ config.ini
 build/
 dist/
 res/
+__pycache__/
